@@ -12,37 +12,37 @@ program.parse();
 
 const options = program.opts();
 
-// Функція для отримання картинки з http.cat, якщо її немає в кеші
-const fetchImageFromHttpCat = async (statusCode, filePath) => {
-    try {
-        const imageUrl = `https://http.cat/${statusCode}`;
-        const response = await superagent.get(imageUrl).responseType('arraybuffer');
-        return response.body;
-    } catch (err) {
-        throw new Error('Image could not be fetched from http.cat');
-    }
-};
-
 const requireListener = async function (req, res) {
-    const code = req.url.slice(1);  // Отримуємо статусний код з URL
-    const filePath = path.join(options.cache, `${code}.jpg`);  // Шлях до файлу
+    const code = req.url.slice(1);
+    const filePath = path.join(options.cache, `${code}.jpg`);
+    
+    // Функція для завантаження картинки з http.cat і кешування її
+    const fetchAndCacheImage = async (statusCode) => {
+        try {
+            const response = await superagent.get(`https://http.cat/${statusCode}`).buffer(true);
+            await fs.promises.writeFile(filePath, response.body);  // Збереження зображення як бінарного файлу
+            return response.body;
+        } catch (err) {
+            console.error(`Error fetching image from http.cat: ${err.message}`);
+            return null; // Якщо картинка не знайдена, повертаємо null
+        }
+    };
 
     switch (req.method) {
         case 'GET':
             try {
-                // Перевірка, чи є файл у кеші
                 if (fs.existsSync(filePath)) {
-                    // Якщо файл існує, відправляємо його
+                    // Якщо файл є в кеші, надсилаємо його
                     const imageData = await fs.promises.readFile(filePath);
                     res.writeHead(200, { 'Content-Type': 'image/jpeg' });
                     res.end(imageData);
                 } else {
-                    // Якщо файлу немає в кеші, робимо запит до http.cat
-                    try {
-                        const imageData = await fetchImageFromHttpCat(code, filePath);
+                    // Якщо файлу немає в кеші, намагаємось завантажити з http.cat
+                    const imageData = await fetchAndCacheImage(code);
+                    if (imageData) {
                         res.writeHead(200, { 'Content-Type': 'image/jpeg' });
                         res.end(imageData);
-                    } catch (err) {
+                    } else {
                         res.writeHead(404);
                         res.end('Not Found');
                     }
@@ -54,30 +54,19 @@ const requireListener = async function (req, res) {
             break;
 
         case 'PUT':
-            let body = '';
+            let body = [];
             req.on('data', chunk => {
-                body += chunk;
+                body.push(chunk);
             });
 
             req.on('end', async () => {
+                body = Buffer.concat(body);
                 try {
-                    // Якщо картинка вже існує в кеші, відправляємо її назад
-                    if (fs.existsSync(filePath)) {
-                        const imageData = await fs.promises.readFile(filePath);
-                        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-                        res.end(imageData);
-                    } else {
-                        // Якщо картинка немає, завантажуємо її з http.cat
-                        const imageData = await fetchImageFromHttpCat(code, filePath);
-                        const imageUrl = `https://http.cat/${code}`;
-                        const response = await superagent.get(imageUrl).responseType('arraybuffer');
-                        await fs.promises.writeFile(filePath, Buffer.from(response.body));
-                        res.writeHead(201);
-                        res.end();
-
-                        // Після завантаження зберігаємо картинку в кеш
-                        await fs.promises.writeFile(filePath, Buffer.from(imageData));
+                    if (!fs.existsSync(filePath)) {
+                        await fs.promises.writeFile(filePath, body);
                     }
+                    res.writeHead(201);
+                    res.end();
                 } catch (err) {
                     res.writeHead(500);
                     res.end('Error writing file');
@@ -87,7 +76,6 @@ const requireListener = async function (req, res) {
 
         case 'DELETE':
             try {
-                // Видалення файлу асинхронно
                 await fs.promises.unlink(filePath);
                 res.writeHead(204);
                 res.end();
@@ -103,10 +91,8 @@ const requireListener = async function (req, res) {
     }
 };
 
-// Створення HTTP сервера
 const server = http.createServer(requireListener);
 
-// Прослуховування порту і хоста
 server.listen(options.port, options.host, () => {
     console.log(`Server started: http://${options.host}:${options.port}`);
 });
